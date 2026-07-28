@@ -136,3 +136,23 @@ def test_unrecognized_extra_reprompts(mock_extract):
     reply = convo.handle_message("piña")  # no es un Topping válido
     assert convo.state == ConversationState.ASK_EXTRAS
     assert "no he reconocido" in reply.lower()
+
+
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_order_property_only_available_when_done(mock_extract):
+    convo = Conversation()
+    assert convo.order is None  # todavía no hay pedido
+
+    convo.handle_message("Leo")
+    convo.handle_message("hawaiana")
+    convo.handle_message("individual")
+    convo.handle_message("1")
+    convo.handle_message("no")
+    convo.handle_message("no")
+    convo.handle_message("no")
+    convo.handle_message("Calle Test 9")
+    assert convo.order is None  # en CONFIRM, todavía no confirmado
+
+    convo.handle_message("sí")
+    assert convo.order is not None
+    assert convo.order.customer_name == "Leo"

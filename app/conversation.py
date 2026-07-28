@@ -56,6 +56,13 @@ class Conversation:
     def is_finished(self) -> bool:
         return self.state in (ConversationState.DONE, ConversationState.CANCELLED)
 
+    @property
+    def order(self) -> Order | None:
+        """El pedido final, disponible solo cuando la conversación ha terminado en DONE."""
+        if self.state != ConversationState.DONE:
+            return None
+        return self._data.get("order")
+
     # ---- Handlers por estado -------------------------------------------
 
     def _handle_ask_name(self, text: str) -> str:
