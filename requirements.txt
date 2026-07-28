@@ -1,7 +1,2 @@
-python-dotenv
-python-telegram-bot
-sqlalchemy
-google-generativeai
-streamlit
-groq
-pyTelegramBotAPI
+pydantic>=2.6
+pytest>=8.0

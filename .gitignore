@@ -1,6 +1,13 @@
+# Entorno virtual
 venv/
-.venv/
-pycache/
-*.db
+__pycache__/
+*.pyc
+
+# Variables de entorno / secretos
 .env
+
+# Cachés de testing
+.pytest_cache/
+
+# Editor
 .vscode/
