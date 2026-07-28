@@ -6,8 +6,9 @@ devuelve texto de respuesta. Eso significa que:
   1. Podemos testearla sin levantar un bot.
   2. En la Fase 3, `bot/telegram_bot.py` será una capa fina que solo
      conecta mensajes de Telegram <-> esta clase.
-  3. En la Fase 1, sustituiremos los métodos `_extract_*` (basados en
-     keywords) por llamadas a Gemini, sin tocar el resto de la máquina.
+  3. En la Fase 1, sustituimos los métodos `_extract_*` (basados en
+     keywords) por llamadas a Gemini como primer intento, manteniendo
+     las reglas como red de seguridad si la IA falla o no aporta nada.
 """
 
 from __future__ import annotations
@@ -16,8 +17,10 @@ from enum import Enum, auto
 
 from pydantic import ValidationError
 
+from app.ai_extractor import extract_order_info
 from app.catalog import PIZZA_INGREDIENTS, order_total
 from app.models import Drink, Order, OrderItem, PizzaType, Size, Topping
+from unittest.mock import patch
 
 
 class ConversationState(Enum):
@@ -72,14 +75,48 @@ class Conversation:
                     return f"La {pizza.value} lleva {ingredients}."
             return "Dime de qué pizza quieres saber los ingredientes."
 
-        pizza = self._extract_pizza(lowered)
+        # Intento 1: extracción con IA (puede resolver pizza+tamaño+cantidad de golpe)
+        extracted = extract_order_info(text)
+
+        pizza = extracted.pizza if extracted else None
+        if pizza is None:
+            # Red de seguridad: si la IA no está disponible o no reconoce
+            # la pizza, caemos en las reglas por keywords de siempre.
+            pizza = self._extract_pizza(lowered)
+
         if pizza is None:
             opciones = ", ".join(p.value for p in PizzaType)
             return f"No tenemos esa pizza. Opciones: {opciones}"
 
         self._data["pizza"] = pizza
-        self.state = ConversationState.ASK_SIZE
-        return f"Perfecto, una {pizza.value}. ¿Qué tamaño quieres? individual, mediana o familiar"
+
+        # Si la IA también capturó tamaño y/o cantidad en el mismo mensaje,
+        # los guardamos ya y nos saltamos esas preguntas.
+        if extracted and extracted.size:
+            self._data["size"] = extracted.size
+        if extracted and extracted.quantity:
+            self._data["quantity"] = extracted.quantity
+
+        return self._advance_after_pizza(pizza)
+
+    def _advance_after_pizza(self, pizza: PizzaType) -> str:
+        """Decide a qué estado saltar según lo que ya sepamos del pedido."""
+        if "size" not in self._data:
+            self.state = ConversationState.ASK_SIZE
+            return f"Perfecto, una {pizza.value}. ¿Qué tamaño quieres? individual, mediana o familiar"
+
+        if "quantity" not in self._data:
+            self.state = ConversationState.ASK_QUANTITY
+            return f"Perfecto, una {pizza.value} {self._data['size'].value}. ¿Cuántas unidades?"
+
+        self.state = ConversationState.ASK_EXTRAS
+        opciones = ", ".join(t.value for t in Topping)
+        qty = self._data["quantity"]
+        size = self._data["size"].value
+        return (
+            f"Perfecto, {qty}x {pizza.value} {size}. "
+            f"¿Algún ingrediente extra? {opciones}\n(separa varios con comas, o escribe 'no')"
+        )
 
     def _handle_ask_size(self, text: str) -> str:
         size = self._extract_size(text.lower())
@@ -157,7 +194,7 @@ class Conversation:
         self.state = ConversationState.CANCELLED
         return "Pedido cancelado. Escribe /start si quieres hacer otro."
 
-    # ---- Extracción (Fase 0: keywords · Fase 1: aquí entrará Gemini) --
+    # ---- Extracción por reglas (red de seguridad si la IA falla) ------
 
     @staticmethod
     def _extract_pizza(lowered: str) -> PizzaType | None:

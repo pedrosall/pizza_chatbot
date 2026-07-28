@@ -3,13 +3,26 @@ Tests de la máquina de estados.
 
 Nota didáctica: como Conversation no depende de Telegram ni de ningún
 servicio externo, estos tests son rápidos, deterministas y no requieren
-mocks. Este es el beneficio directo de haber separado bien las capas.
+red. Por eso mockeamos `extract_order_info`: sin el mock, cada test que
+pasa por ASK_PIZZA haría una llamada real a la API de Gemini (lento,
+frágil ante cortes de red o cuota, y no determinista). Con
+`return_value=None` simulamos "la IA no aportó nada", forzando el mismo
+camino por reglas de keywords que estos tests ya validaban en la Fase 0.
+
+Importante: mockeamos "app.conversation.extract_order_info" (donde se
+usa), no "app.ai_extractor.extract_order_info" (donde se define). Al
+hacer `from app.ai_extractor import extract_order_info` dentro de
+conversation.py, ese nombre queda enganchado también al módulo
+`app.conversation`, así que hay que interceptarlo ahí.
 """
+
+from unittest.mock import patch
 
 from app.conversation import Conversation, ConversationState
 
 
-def test_happy_path_completes_order():
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_happy_path_completes_order(mock_extract):
     convo = Conversation()
 
     reply = convo.handle_message("Pedro")
@@ -44,7 +57,8 @@ def test_happy_path_completes_order():
     assert convo.state == ConversationState.DONE
 
 
-def test_cancel_at_confirmation():
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_cancel_at_confirmation(mock_extract):
     convo = Conversation()
     convo.handle_message("Ana")
     convo.handle_message("pepperoni")
@@ -61,7 +75,8 @@ def test_cancel_at_confirmation():
     assert "cancelado" in reply.lower()
 
 
-def test_invalid_pizza_does_not_advance_state():
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_invalid_pizza_does_not_advance_state(mock_extract):
     convo = Conversation()
     convo.handle_message("Luis")
     reply = convo.handle_message("quiero una pizza de piña con nata")
@@ -69,7 +84,8 @@ def test_invalid_pizza_does_not_advance_state():
     assert "no tenemos" in reply.lower()
 
 
-def test_ingredient_question_does_not_consume_pizza_slot():
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_ingredient_question_does_not_consume_pizza_slot(mock_extract):
     convo = Conversation()
     convo.handle_message("Marta")
     reply = convo.handle_message("¿qué lleva la vegetariana?")
@@ -77,7 +93,8 @@ def test_ingredient_question_does_not_consume_pizza_slot():
     assert convo.state == ConversationState.ASK_PIZZA
 
 
-def test_invalid_quantity_reprompts():
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_invalid_quantity_reprompts(mock_extract):
     convo = Conversation()
     convo.handle_message("Iker")
     convo.handle_message("hawaiana")
@@ -87,7 +104,8 @@ def test_invalid_quantity_reprompts():
     assert "número" in reply.lower()
 
 
-def test_word_number_for_quantity():
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_word_number_for_quantity(mock_extract):
     convo = Conversation()
     convo.handle_message("Iker")
     convo.handle_message("hawaiana")
@@ -96,7 +114,8 @@ def test_word_number_for_quantity():
     assert convo.state == ConversationState.ASK_EXTRAS
 
 
-def test_extras_multiple_toppings_no_duplicates():
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_extras_multiple_toppings_no_duplicates(mock_extract):
     convo = Conversation()
     convo.handle_message("Nora")
     convo.handle_message("margarita")
@@ -107,7 +126,8 @@ def test_extras_multiple_toppings_no_duplicates():
     assert len(order_item_extras) == 2  # bacon no se duplica
 
 
-def test_unrecognized_extra_reprompts():
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_unrecognized_extra_reprompts(mock_extract):
     convo = Conversation()
     convo.handle_message("Nora")
     convo.handle_message("margarita")
