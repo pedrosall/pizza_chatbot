@@ -179,3 +179,29 @@ def test_off_topic_falls_back_when_ai_unavailable(mock_faq, mock_extract):
     convo = Conversation()
     reply = convo.handle_message("cuéntame un chiste")
     assert "no te he entendido bien" in reply.lower()
+
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_multiple_pizzas_detected_gets_explicit_confirmation(mock_extract):
+    convo = Conversation()
+    reply = convo.handle_message("una pepperoni y una vegetariana")
+    assert "2 pizzas" in reply
+    assert "quedan 1 pizza" in reply.lower()
+
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_size_synonym_grande_maps_to_familiar(mock_extract):
+    convo = Conversation()
+    convo.handle_message("margarita")
+    convo.handle_message("1")
+    reply = convo.handle_message("grande")
+    assert convo.state == ConversationState.ASK_ITEM_EXTRAS
+    assert "familiar" in reply.lower()
+
+
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_size_synonym_pequena_maps_to_individual(mock_extract):
+    convo = Conversation()
+    convo.handle_message("margarita")
+    convo.handle_message("1")
+    reply = convo.handle_message("pequeña")
+    assert convo.state == ConversationState.ASK_ITEM_EXTRAS
+    assert "individual" in reply.lower()

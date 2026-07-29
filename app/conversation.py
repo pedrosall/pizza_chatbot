@@ -2,16 +2,16 @@
 Máquina de estados de la conversación.
 
 Diseño: se toma el pedido completo primero (pueden mencionarse varias
-pizzas de golpe), luego bebidas y notas, y los datos de entrega
-(nombre, dirección) se piden al FINAL, como en un pedido real de
-pizzería por teléfono. Antes de confirmar, se "repite" el pedido
-completo para que el cliente pueda corregir cualquier error.
+pizzas de golpe, incluso la misma pizza en tamaños distintos), luego
+bebidas y notas, y los datos de entrega (nombre, dirección) se piden al
+FINAL, como en un pedido real de pizzería por teléfono. Antes de
+confirmar, se "repite" el pedido completo para que el cliente pueda
+corregir cualquier error.
 
 Cuando un mensaje en ASK_ORDER no contiene ninguna pizza reconocible,
-en vez de asumir directamente que es un error, comprobamos primero si
-es una pregunta sobre el menú (regla simple y gratuita) y, si no,
-delegamos en la IA para responder con criterio (bromas, horarios,
-dudas genéricas) usando solo datos reales del negocio.
+comprobamos primero si es una pregunta sobre el menú (regla simple y
+gratuita) y, si no, delegamos en la IA para responder con criterio
+(bromas, horarios, dudas genéricas) usando solo datos reales del negocio.
 """
 
 from __future__ import annotations
@@ -32,6 +32,17 @@ _MENU_KEYWORDS = (
     "qué tenéis", "que teneis", "menú", "menu", "qué hay", "que hay",
     "opciones", "carta",
 )
+_SIZE_SYNONYMS = {
+    "grande": "familiar",
+    "grandes": "familiar",
+    "pequeña": "individual",
+    "pequeñas": "individual",
+    "pequeno": "individual",
+    "pequeño": "individual",
+    "personal": "individual",
+    "chica": "individual",
+    "chicas": "individual",
+}
 
 
 class ConversationState(Enum):
@@ -123,28 +134,36 @@ class Conversation:
             return f"No te he entendido bien. Si quieres pedir, dime una pizza. Opciones: {opciones}"
 
         self._pending.extend(items)
+
+        if len(items) > 1:
+            resumen = ", ".join(it["pizza"].value for it in items)
+            intro = f"Perfecto, he apuntado {len(items)} pizzas: {resumen}. Vamos a completar cada una.\n\n"
+            return intro + self._advance_pending()
+
         return self._advance_pending()
 
     def _advance_pending(self) -> str:
         if self._pending:
             current = self._pending[0]
             pizza = current["pizza"]
+            restantes = len(self._pending) - 1
+            aviso = f" (quedan {restantes} pizza/s más por completar después de esta)" if restantes else ""
 
             if current.get("quantity") is None:
                 self.state = ConversationState.ASK_ITEM_QUANTITY
-                return f"¿Cuántas {pizza.value} quieres?"
+                return f"¿Cuántas {pizza.value} quieres?{aviso}"
 
             if current.get("size") is None:
                 self.state = ConversationState.ASK_ITEM_SIZE
                 qty = current["quantity"]
-                return f"{qty}x {pizza.value}. ¿Qué tamaño? individual, mediana o familiar"
+                return f"{qty}x {pizza.value}. ¿Qué tamaño? individual, mediana o familiar{aviso}"
 
             self.state = ConversationState.ASK_ITEM_EXTRAS
             opciones = ", ".join(t.value for t in Topping)
             qty, size = current["quantity"], current["size"].value
             return (
                 f"{qty}x {pizza.value} ({size}). ¿Algún ingrediente extra? {opciones}\n"
-                "(separa varios con comas, o escribe 'no')"
+                f"(separa varios con comas, o escribe 'no'){aviso}"
             )
 
         self.state = ConversationState.ASK_MORE_PIZZA
@@ -158,7 +177,7 @@ class Conversation:
         return self._advance_pending()
 
     def _handle_ask_item_size(self, text: str) -> str:
-        size = self._extract_size(text.lower())
+        size = self._extract_size(self._normalize_sizes(text).lower())
         if size is None:
             return "Elige un tamaño: individual, mediana o familiar"
         self._pending[0]["size"] = size
@@ -250,7 +269,8 @@ class Conversation:
     # ---- Extracción y ayudantes -----------------------------------------
 
     def _extract_items(self, text: str) -> list[dict]:
-        extracted = extract_order_info(text)
+        normalized = self._normalize_sizes(text)
+        extracted = extract_order_info(normalized)
         items: list[dict] = []
         if extracted and extracted.items:
             for ei in extracted.items:
@@ -258,7 +278,7 @@ class Conversation:
                     items.append({"pizza": ei.pizza, "size": ei.size, "quantity": ei.quantity})
 
         if not items:
-            lowered = text.lower()
+            lowered = normalized.lower()
             for pizza in PizzaType:
                 if pizza.value in lowered:
                     items.append({"pizza": pizza, "size": None, "quantity": None})
@@ -280,6 +300,13 @@ class Conversation:
     def _menu_text() -> str:
         lineas = [f"- {p.value}: {PIZZA_INGREDIENTS[p]}" for p in PizzaType]
         return "Estas son nuestras pizzas:\n" + "\n".join(lineas) + "\n\n¿Cuál te apetece?"
+
+    @staticmethod
+    def _normalize_sizes(text: str) -> str:
+        result = text
+        for synonym, canonical in _SIZE_SYNONYMS.items():
+            result = re.sub(rf"\b{synonym}\b", canonical, result, flags=re.IGNORECASE)
+        return result
 
     @staticmethod
     def _extract_size(lowered: str) -> Size | None:
