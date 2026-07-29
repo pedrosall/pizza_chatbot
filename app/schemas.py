@@ -1,4 +1,4 @@
-"""Esquema de extracción para la IA — ahora una LISTA de pizzas por mensaje."""
+"""Esquemas de extracción y validación para la capa de IA."""
 
 from __future__ import annotations
 
@@ -16,6 +16,11 @@ class ExtractedItem(BaseModel):
 
 
 class ExtractedOrder(BaseModel):
-    """Un mensaje puede mencionar varias pizzas distintas a la vez."""
-
     items: list[ExtractedItem] = Field(default_factory=list)
+
+
+class ValidationCheck(BaseModel):
+    """Resultado de validar un campo de texto libre (dirección, notas)."""
+
+    valid: bool
+    reason: Optional[str] = Field(default=None, description="Motivo breve si valid=False")

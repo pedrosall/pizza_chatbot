@@ -1,17 +1,18 @@
 """
 Máquina de estados de la conversación.
 
-Diseño: se toma el pedido completo primero (pueden mencionarse varias
-pizzas de golpe, incluso la misma pizza en tamaños distintos), luego
-bebidas y notas, y los datos de entrega (nombre, dirección) se piden al
-FINAL, como en un pedido real de pizzería por teléfono. Antes de
-confirmar, se "repite" el pedido completo para que el cliente pueda
-corregir cualquier error.
+Diseño: se toma el pedido completo primero (varias pizzas, incluso la
+misma en tamaños distintos), luego bebidas y notas, y los datos de
+entrega al final, repitiendo el pedido completo antes de confirmar.
 
-Cuando un mensaje en ASK_ORDER no contiene ninguna pizza reconocible,
-comprobamos primero si es una pregunta sobre el menú (regla simple y
-gratuita) y, si no, delegamos en la IA para responder con criterio
-(bromas, horarios, dudas genéricas) usando solo datos reales del negocio.
+Los dos campos de texto MÁS libres (dirección y notas) son también los
+de MAYOR riesgo: una dirección puede ser una broma/dirección falsa, y
+unas notas pueden ser spam o, más seriamente, un intento de inyección
+de instrucciones si ese texto llegara a tocar un prompt de IA en algún
+punto del sistema (por ejemplo, si en el futuro un asistente de cocina
+lee las notas). Por eso ambos pasan por una validación con IA (con
+regla de reserva determinista si la IA no está disponible) antes de
+aceptarse, igual que ya hacemos con la extracción del pedido.
 """
 
 from __future__ import annotations
@@ -21,9 +22,18 @@ from enum import Enum, auto
 
 from pydantic import ValidationError
 
-from app.ai_extractor import answer_off_topic, extract_order_info
+from app.ai_extractor import answer_off_topic, check_address, check_notes, extract_order_info
 from app.catalog import PIZZA_INGREDIENTS, order_total
-from app.models import CartItem, Drink, DrinkSelection, DRINK_DISPLAY_NAMES, Order, PizzaType, Size, Topping
+from app.models import (
+    CartItem,
+    Drink,
+    DRINK_DISPLAY_NAMES,
+    DrinkSelection,
+    Order,
+    PizzaType,
+    Size,
+    Topping,
+)
 
 _BACK_COMMANDS = ("atrás", "atras", "volver")
 _WORD_NUMBERS = {"un": 1, "una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5}
@@ -33,31 +43,24 @@ _MENU_KEYWORDS = (
     "opciones", "carta",
 )
 _SIZE_SYNONYMS = {
-    "grande": "familiar",
-    "grandes": "familiar",
-    "pequeña": "individual",
-    "pequeñas": "individual",
-    "pequeno": "individual",
-    "pequeño": "individual",
-    "personal": "individual",
-    "chica": "individual",
-    "chicas": "individual",
+    "grande": "familiar", "grandes": "familiar",
+    "pequeña": "individual", "pequeñas": "individual",
+    "pequeno": "individual", "pequeño": "individual",
+    "personal": "individual", "chica": "individual", "chicas": "individual",
 }
-
 _DRINK_SYNONYMS = {
-    "cocacola": "cola",
-    "coca-cola": "cola",
-    "coca cola": "cola",
-    "refresco de cola": "cola",
-    "limón": "limonada",
-    "fanta de limón" : "limonada",
-    "limon": "limonada",
-    "naranjada": "refresco de naranja",
-    "fanta de naranja": "refresco de naranja",
-    "sprite": "sprite",
-    "7up": "sprite"
+    "cocacola": "cola", "coca-cola": "cola", "coca cola": "cola",
+    "refresco de cola": "cola", "limón": "limonada", "limon": "limonada",
+    "refresco de naranja": "naranja", "naranjada": "naranja",
 }
 _DRINK_SPLIT_RE = re.compile(r",| y | e ")
+_FICTIONAL_PLACE_BLOCKLIST = (
+    "marte", "luna", "narnia", "hogwarts", "gotham", "atlantis", "neverland", "asgard",
+)
+_INJECTION_PATTERNS = (
+    "ignora las instrucciones", "ignora todo lo anterior", "system prompt",
+    "eres ahora", "olvida tus instrucciones", "actúa como", "actua como",
+)
 
 
 class ConversationState(Enum):
@@ -244,7 +247,20 @@ class Conversation:
 
     def _handle_ask_notes(self, text: str) -> str:
         lowered = text.lower()
-        self._data["notes"] = None if lowered == "no" else text
+        if lowered == "no":
+            self._data["notes"] = None
+            self.state = ConversationState.ASK_NAME
+            return "Ya casi está 🙂 ¿A nombre de quién pongo el pedido?"
+
+        valid, reason = self._validate_notes(text)
+        if not valid:
+            motivo = f" ({reason})" if reason else ""
+            return (
+                f"Esa nota no parece una petición de pedido{motivo}. "
+                "Cuéntame solo alergias o instrucciones de entrega, o escribe 'no'."
+            )
+
+        self._data["notes"] = text
         self.state = ConversationState.ASK_NAME
         return "Ya casi está 🙂 ¿A nombre de quién pongo el pedido?"
 
@@ -256,8 +272,17 @@ class Conversation:
         return f"Genial, {text.capitalize()}. ¿A qué dirección lo enviamos?"
 
     def _handle_ask_address(self, text: str) -> str:
-        if len(text) < 5:
-            return "Esa dirección parece incompleta, ¿puedes darme más detalle?"
+        if len(text) < 3:
+            return "Esa dirección parece incompleta, ¿puedes darme calle y número?"
+
+        valid, reason = self._validate_address(text)
+        if not valid:
+            motivo = f" ({reason})" if reason else ""
+            return (
+                f"Esa dirección no me parece válida{motivo}. "
+                "Escribe una dirección real, con calle y número."
+            )
+
         self._data["address"] = text
 
         order, error = self._build_order()
@@ -281,7 +306,7 @@ class Conversation:
         self.state = ConversationState.CANCELLED
         return "Pedido cancelado. Escribe /start si quieres hacer otro."
 
-    # ---- Extracción y ayudantes -----------------------------------------
+    # ---- Extracción y validación -----------------------------------------
 
     def _extract_items(self, text: str) -> list[dict]:
         normalized = self._normalize_sizes(text)
@@ -299,6 +324,47 @@ class Conversation:
                     items.append({"pizza": pizza, "size": None, "quantity": None})
 
         return items
+
+    def _extract_drinks(self, text: str) -> list[DrinkSelection]:
+        normalized = self._normalize_drinks(text.lower())
+        chunks = [c.strip() for c in _DRINK_SPLIT_RE.split(normalized) if c.strip()]
+        if not chunks:
+            chunks = [normalized]
+
+        selections: list[DrinkSelection] = []
+        for chunk in chunks:
+            drink = self._extract_drink(chunk)
+            if drink is None:
+                continue
+            qty = self._find_quantity(chunk) or 1
+            selections.append(DrinkSelection(drink=drink, quantity=qty))
+        return selections
+
+    def _validate_address(self, text: str) -> tuple[bool, str | None]:
+        result = check_address(text)
+        if result is not None:
+            return result.valid, result.reason
+
+        lowered = text.lower()
+        if any(word in lowered for word in _FICTIONAL_PLACE_BLOCKLIST):
+            return False, "no es un lugar real"
+        if not re.search(r"\d", text):
+            return False, "falta el número de la calle"
+        return True, None
+
+    def _validate_notes(self, text: str) -> tuple[bool, str | None]:
+        result = check_notes(text)
+        if result is not None:
+            return result.valid, result.reason
+
+        lowered = text.lower()
+        if any(p in lowered for p in _INJECTION_PATTERNS):
+            return False, "contenido no permitido"
+        if "http://" in lowered or "https://" in lowered:
+            return False, "no se permiten enlaces"
+        if len(text) > 150:
+            return False, "demasiado larga, resúmela"
+        return True, None
 
     def _cart_summary(self) -> str:
         lines = []
@@ -329,26 +395,6 @@ class Conversation:
         for synonym, canonical in _DRINK_SYNONYMS.items():
             result = re.sub(rf"\b{re.escape(synonym)}\b", canonical, result, flags=re.IGNORECASE)
         return result
-
-    def _extract_drinks(self, text: str) -> list[DrinkSelection]:
-        """Reconoce varias bebidas en un mismo mensaje ('una cerveza y una
-        cocacola'), separando por comas y conjunciones. No usa IA aquí a
-        propósito: el catálogo de bebidas es pequeño y cerrado, así que
-        reglas simples bastan y evitan una llamada de red innecesaria.
-        """
-        normalized = self._normalize_drinks(text.lower())
-        chunks = [c.strip() for c in _DRINK_SPLIT_RE.split(normalized) if c.strip()]
-        if not chunks:
-            chunks = [normalized]
-
-        selections: list[DrinkSelection] = []
-        for chunk in chunks:
-            drink = self._extract_drink(chunk)
-            if drink is None:
-                continue
-            qty = self._find_quantity(chunk) or 1
-            selections.append(DrinkSelection(drink=drink, quantity=qty))
-        return selections
 
     @staticmethod
     def _extract_size(lowered: str) -> Size | None:
