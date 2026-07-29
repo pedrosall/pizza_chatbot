@@ -1,18 +1,9 @@
-"""
-Tests del repositorio.
-
-Usamos una base de datos SQLite EN MEMORIA (":memory:"), exclusiva para
-estos tests, en vez del archivo pizzabot.db real. Así los tests no
-ensucian tus datos de desarrollo ni dependen de qué haya en el archivo
-en ese momento — cada test empieza con una base de datos limpia.
-"""
-
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models import Drink, Order, OrderItem, PizzaType, Size, Topping
+from app.models import CartItem, DrinkSelection, Drink, Order, PizzaType, Size, Topping
 from app.repository import list_orders, save_order
 
 
@@ -26,10 +17,11 @@ def test_session_factory():
 def _sample_order() -> Order:
     return Order(
         customer_name="Ana",
-        item=OrderItem(
-            pizza=PizzaType.MARGARITA, size=Size.MEDIANA, quantity=2, extras=[Topping.BACON]
-        ),
-        drink=Drink.COLA,
+        items=[
+            CartItem(pizza=PizzaType.MARGARITA, size=Size.MEDIANA, quantity=2, extras=[Topping.BACON]),
+            CartItem(pizza=PizzaType.PEPPERONI, size=Size.FAMILIAR, quantity=1),
+        ],
+        drinks=[DrinkSelection(drink=Drink.CERVEZA, quantity=3)],
         address="Calle Falsa 123",
     )
 
@@ -39,8 +31,9 @@ def test_save_order_persists_correct_data(test_session_factory):
 
     assert record.id is not None
     assert record.customer_name == "Ana"
-    assert record.pizza == "margarita"
-    assert record.extras == "bacon"
+    assert "margarita" in record.items_json
+    assert "pepperoni" in record.items_json
+    assert "cerveza" in record.drinks_json
     assert record.total_price > 0
 
 

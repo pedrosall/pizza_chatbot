@@ -1,36 +1,48 @@
 """
 Máquina de estados de la conversación.
 
-Diseño clave: esta clase NO sabe nada de Telegram. Recibe texto del usuario,
-devuelve texto de respuesta. Eso significa que:
-  1. Podemos testearla sin levantar un bot.
-  2. En la Fase 3, `bot/telegram_bot.py` será una capa fina que solo
-     conecta mensajes de Telegram <-> esta clase.
-  3. En la Fase 1, sustituimos los métodos `_extract_*` (basados en
-     keywords) por llamadas a Gemini como primer intento, manteniendo
-     las reglas como red de seguridad si la IA falla o no aporta nada.
+Diseño: se toma el pedido completo primero (pueden mencionarse varias
+pizzas de golpe), luego bebidas y notas, y los datos de entrega
+(nombre, dirección) se piden al FINAL, como en un pedido real de
+pizzería por teléfono. Antes de confirmar, se "repite" el pedido
+completo para que el cliente pueda corregir cualquier error.
+
+Cuando un mensaje en ASK_ORDER no contiene ninguna pizza reconocible,
+en vez de asumir directamente que es un error, comprobamos primero si
+es una pregunta sobre el menú (regla simple y gratuita) y, si no,
+delegamos en la IA para responder con criterio (bromas, horarios,
+dudas genéricas) usando solo datos reales del negocio.
 """
 
 from __future__ import annotations
 
+import re
 from enum import Enum, auto
 
 from pydantic import ValidationError
 
-from app.ai_extractor import extract_order_info
+from app.ai_extractor import answer_off_topic, extract_order_info
 from app.catalog import PIZZA_INGREDIENTS, order_total
-from app.models import Drink, Order, OrderItem, PizzaType, Size, Topping
-from unittest.mock import patch
+from app.models import CartItem, Drink, DrinkSelection, Order, PizzaType, Size, Topping
+
+_BACK_COMMANDS = ("atrás", "atras", "volver")
+_WORD_NUMBERS = {"un": 1, "una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5}
+_MENU_KEYWORDS = (
+    "qué pizzas", "que pizzas", "cuáles tenéis", "cuales teneis",
+    "qué tenéis", "que teneis", "menú", "menu", "qué hay", "que hay",
+    "opciones", "carta",
+)
 
 
 class ConversationState(Enum):
-    ASK_NAME = auto()
-    ASK_PIZZA = auto()
-    ASK_SIZE = auto()
-    ASK_QUANTITY = auto()
-    ASK_EXTRAS = auto()
-    ASK_DRINK = auto()
+    ASK_ORDER = auto()
+    ASK_ITEM_QUANTITY = auto()
+    ASK_ITEM_SIZE = auto()
+    ASK_ITEM_EXTRAS = auto()
+    ASK_MORE_PIZZA = auto()
+    ASK_DRINKS = auto()
     ASK_NOTES = auto()
+    ASK_NAME = auto()
     ASK_ADDRESS = auto()
     CONFIRM = auto()
     DONE = auto()
@@ -38,19 +50,44 @@ class ConversationState(Enum):
 
 
 class Conversation:
-    """Una instancia = una conversación con un cliente concreto."""
-
     def __init__(self) -> None:
-        self.state = ConversationState.ASK_NAME
-        self._data: dict = {"extras": []}
+        self.state = ConversationState.ASK_ORDER
+        self._data: dict = {}
+        self._pending: list[dict] = []
+        self._items: list[CartItem] = []
+        self._drinks: list[DrinkSelection] = []
+        self._history: list[tuple[ConversationState, str]] = []
+        self._last_prompt = ""
 
     # ---- API pública ---------------------------------------------------
 
+    def greeting(self) -> str:
+        self.state = ConversationState.ASK_ORDER
+        self._last_prompt = (
+            "¡Hola! Bienvenido a PizzaBot 🍕 ¿Qué te apetece pedir?\n"
+            "Puedes decírmelo todo junto, por ejemplo: "
+            "'dos pepperoni familiares y una margarita mediana'."
+        )
+        return self._last_prompt
+
     def handle_message(self, text: str) -> str:
-        """Punto de entrada único: texto crudo del usuario -> respuesta."""
         text = text.strip()
+        lowered = text.lower()
+
+        if lowered in _BACK_COMMANDS:
+            if not self._history:
+                return "No hay ningún paso anterior al que volver."
+            self.state, self._last_prompt = self._history.pop()
+            return self._last_prompt
+
+        if self.is_finished:
+            return "Este pedido ya ha terminado. Escribe /start para empezar uno nuevo."
+
+        self._history.append((self.state, self._last_prompt))
         handler = getattr(self, f"_handle_{self.state.name.lower()}")
-        return handler(text)
+        reply = handler(text)
+        self._last_prompt = reply
+        return reply
 
     @property
     def is_finished(self) -> bool:
@@ -58,22 +95,13 @@ class Conversation:
 
     @property
     def order(self) -> Order | None:
-        """El pedido final, disponible solo cuando la conversación ha terminado en DONE."""
         if self.state != ConversationState.DONE:
             return None
         return self._data.get("order")
 
-    # ---- Handlers por estado -------------------------------------------
+    # ---- Toma del pedido -------------------------------------------------
 
-    def _handle_ask_name(self, text: str) -> str:
-        if not text:
-            return "No te he entendido, ¿cómo te llamas?"
-        self._data["customer_name"] = text
-        self.state = ConversationState.ASK_PIZZA
-        opciones = ", ".join(p.value for p in PizzaType)
-        return f"Encantado {text.capitalize()} 🍕 ¿Qué pizza te apetece?\nOpciones: {opciones}"
-
-    def _handle_ask_pizza(self, text: str) -> str:
+    def _handle_ask_order(self, text: str) -> str:
         lowered = text.lower()
 
         if "lleva" in lowered or "ingredientes" in lowered:
@@ -82,99 +110,116 @@ class Conversation:
                     return f"La {pizza.value} lleva {ingredients}."
             return "Dime de qué pizza quieres saber los ingredientes."
 
-        # Intento 1: extracción con IA (puede resolver pizza+tamaño+cantidad de golpe)
-        extracted = extract_order_info(text)
+        items = self._extract_items(text)
+        if not items:
+            if self._looks_like_menu_question(lowered):
+                return self._menu_text()
 
-        pizza = extracted.pizza if extracted else None
-        if pizza is None:
-            # Red de seguridad: si la IA no está disponible o no reconoce
-            # la pizza, caemos en las reglas por keywords de siempre.
-            pizza = self._extract_pizza(lowered)
+            off_topic_reply = answer_off_topic(text)
+            if off_topic_reply:
+                return off_topic_reply
 
-        if pizza is None:
             opciones = ", ".join(p.value for p in PizzaType)
-            return f"No tenemos esa pizza. Opciones: {opciones}"
+            return f"No te he entendido bien. Si quieres pedir, dime una pizza. Opciones: {opciones}"
 
-        self._data["pizza"] = pizza
+        self._pending.extend(items)
+        return self._advance_pending()
 
-        # Si la IA también capturó tamaño y/o cantidad en el mismo mensaje,
-        # los guardamos ya y nos saltamos esas preguntas.
-        if extracted and extracted.size:
-            self._data["size"] = extracted.size
-        if extracted and extracted.quantity:
-            self._data["quantity"] = extracted.quantity
+    def _advance_pending(self) -> str:
+        if self._pending:
+            current = self._pending[0]
+            pizza = current["pizza"]
 
-        return self._advance_after_pizza(pizza)
+            if current.get("quantity") is None:
+                self.state = ConversationState.ASK_ITEM_QUANTITY
+                return f"¿Cuántas {pizza.value} quieres?"
 
-    def _advance_after_pizza(self, pizza: PizzaType) -> str:
-        """Decide a qué estado saltar según lo que ya sepamos del pedido."""
-        if "size" not in self._data:
-            self.state = ConversationState.ASK_SIZE
-            return f"Perfecto, una {pizza.value}. ¿Qué tamaño quieres? individual, mediana o familiar"
+            if current.get("size") is None:
+                self.state = ConversationState.ASK_ITEM_SIZE
+                qty = current["quantity"]
+                return f"{qty}x {pizza.value}. ¿Qué tamaño? individual, mediana o familiar"
 
-        if "quantity" not in self._data:
-            self.state = ConversationState.ASK_QUANTITY
-            return f"Perfecto, una {pizza.value} {self._data['size'].value}. ¿Cuántas unidades?"
+            self.state = ConversationState.ASK_ITEM_EXTRAS
+            opciones = ", ".join(t.value for t in Topping)
+            qty, size = current["quantity"], current["size"].value
+            return (
+                f"{qty}x {pizza.value} ({size}). ¿Algún ingrediente extra? {opciones}\n"
+                "(separa varios con comas, o escribe 'no')"
+            )
 
-        self.state = ConversationState.ASK_EXTRAS
-        opciones = ", ".join(t.value for t in Topping)
-        qty = self._data["quantity"]
-        size = self._data["size"].value
-        return (
-            f"Perfecto, {qty}x {pizza.value} {size}. "
-            f"¿Algún ingrediente extra? {opciones}\n(separa varios con comas, o escribe 'no')"
-        )
+        self.state = ConversationState.ASK_MORE_PIZZA
+        return f"{self._cart_summary()}\n¿Quieres añadir alguna pizza más? (sí/no)"
 
-    def _handle_ask_size(self, text: str) -> str:
+    def _handle_ask_item_quantity(self, text: str) -> str:
+        qty = self._find_quantity(text.lower())
+        if qty is None:
+            return "Dime un número de unidades (por ejemplo: 2)"
+        self._pending[0]["quantity"] = qty
+        return self._advance_pending()
+
+    def _handle_ask_item_size(self, text: str) -> str:
         size = self._extract_size(text.lower())
         if size is None:
             return "Elige un tamaño: individual, mediana o familiar"
-        self._data["size"] = size
-        self.state = ConversationState.ASK_QUANTITY
-        return "¿Cuántas unidades?"
+        self._pending[0]["size"] = size
+        return self._advance_pending()
 
-    def _handle_ask_quantity(self, text: str) -> str:
-        qty = self._extract_quantity(text.lower())
-        if qty is None:
-            return "Dime un número de unidades (por ejemplo: 2)"
-        self._data["quantity"] = qty
-        self.state = ConversationState.ASK_EXTRAS
-        opciones = ", ".join(t.value for t in Topping)
-        return f"¿Algún ingrediente extra? {opciones}\n(separa varios con comas, o escribe 'no')"
-
-    def _handle_ask_extras(self, text: str) -> str:
+    def _handle_ask_item_extras(self, text: str) -> str:
         lowered = text.lower()
+        extras: list[Topping] = []
         if lowered != "no":
             extras = self._extract_toppings(lowered)
             if not extras:
                 opciones = ", ".join(t.value for t in Topping)
                 return f"No he reconocido ningún extra. Opciones: {opciones} (o escribe 'no')"
-            self._data["extras"] = extras
 
-        self.state = ConversationState.ASK_DRINK
+        current = self._pending.pop(0)
+        item = CartItem(
+            pizza=current["pizza"], size=current["size"], quantity=current["quantity"], extras=extras
+        )
+        self._items.append(item)
+        return self._advance_pending()
+
+    def _handle_ask_more_pizza(self, text: str) -> str:
+        lowered = text.lower()
+        if lowered in ("si", "sí"):
+            self.state = ConversationState.ASK_ORDER
+            return "Cuéntame qué otra pizza quieres."
+
+        self.state = ConversationState.ASK_DRINKS
         opciones = ", ".join(d.value for d in Drink)
-        return f"¿Quieres alguna bebida?\nBebidas: {opciones} o escribe 'no'"
+        return (
+            "¿Quieres alguna bebida? Dime cuál y cuántas (ej: '2 cervezas'), "
+            f"o escribe 'no' para seguir.\nBebidas: {opciones}"
+        )
 
-    def _handle_ask_drink(self, text: str) -> str:
+    def _handle_ask_drinks(self, text: str) -> str:
         lowered = text.lower()
         if lowered == "no":
-            self._data["drink"] = None
-        else:
-            drink = self._extract_drink(lowered)
-            if drink is None:
-                opciones = ", ".join(d.value for d in Drink)
-                return f"Elige una bebida válida ({opciones}) o escribe 'no'"
-            self._data["drink"] = drink
+            self.state = ConversationState.ASK_NOTES
+            return "¿Alguna alergia o petición especial? (o escribe 'no')"
 
-        self.state = ConversationState.ASK_NOTES
-        return "¿Alguna alergia o petición especial? (o escribe 'no')"
+        drink = self._extract_drink(lowered)
+        if drink is None:
+            opciones = ", ".join(d.value for d in Drink)
+            return f"No he reconocido esa bebida. Opciones: {opciones} (o escribe 'no' para seguir)"
+
+        qty = self._find_quantity(lowered) or 1
+        self._drinks.append(DrinkSelection(drink=drink, quantity=qty))
+        return f"Apuntadas {qty}x {drink.value} 🥤 ¿Otra bebida? o escribe 'no' para seguir."
 
     def _handle_ask_notes(self, text: str) -> str:
         lowered = text.lower()
         self._data["notes"] = None if lowered == "no" else text
+        self.state = ConversationState.ASK_NAME
+        return "Ya casi está 🙂 ¿A nombre de quién pongo el pedido?"
 
+    def _handle_ask_name(self, text: str) -> str:
+        if not text:
+            return "¿A nombre de quién pongo el pedido?"
+        self._data["customer_name"] = text
         self.state = ConversationState.ASK_ADDRESS
-        return "¿Cuál es tu dirección de entrega?"
+        return f"Genial, {text.capitalize()}. ¿A qué dirección lo enviamos?"
 
     def _handle_ask_address(self, text: str) -> str:
         if len(text) < 5:
@@ -188,10 +233,11 @@ class Conversation:
 
         self._data["order"] = order
         self.state = ConversationState.CONFIRM
-        total = order_total(
-            order.item.pizza, order.item.size, order.item.quantity, order.item.extras, order.drink
+        total = order_total(order)
+        return (
+            "Repito tu pedido para confirmar:\n\n"
+            f"{order.summary()}\n💶 Total: {total}€\n\n¿Confirmamos? (sí/no)"
         )
-        return f"{order.summary()}\n💶 Total: {total}€\n\n¿Confirmamos? (sí/no)"
 
     def _handle_confirm(self, text: str) -> str:
         lowered = text.lower()
@@ -201,14 +247,39 @@ class Conversation:
         self.state = ConversationState.CANCELLED
         return "Pedido cancelado. Escribe /start si quieres hacer otro."
 
-    # ---- Extracción por reglas (red de seguridad si la IA falla) ------
+    # ---- Extracción y ayudantes -----------------------------------------
+
+    def _extract_items(self, text: str) -> list[dict]:
+        extracted = extract_order_info(text)
+        items: list[dict] = []
+        if extracted and extracted.items:
+            for ei in extracted.items:
+                if ei.pizza is not None:
+                    items.append({"pizza": ei.pizza, "size": ei.size, "quantity": ei.quantity})
+
+        if not items:
+            lowered = text.lower()
+            for pizza in PizzaType:
+                if pizza.value in lowered:
+                    items.append({"pizza": pizza, "size": None, "quantity": None})
+
+        return items
+
+    def _cart_summary(self) -> str:
+        lines = []
+        for item in self._items:
+            extras_txt = f" + {', '.join(e.value for e in item.extras)}" if item.extras else ""
+            lines.append(f"{item.quantity}x {item.pizza.value} ({item.size.value}){extras_txt}")
+        return "Llevas: " + "; ".join(lines)
 
     @staticmethod
-    def _extract_pizza(lowered: str) -> PizzaType | None:
-        for pizza in PizzaType:
-            if pizza.value in lowered:
-                return pizza
-        return None
+    def _looks_like_menu_question(lowered: str) -> bool:
+        return any(k in lowered for k in _MENU_KEYWORDS)
+
+    @staticmethod
+    def _menu_text() -> str:
+        lineas = [f"- {p.value}: {PIZZA_INGREDIENTS[p]}" for p in PizzaType]
+        return "Estas son nuestras pizzas:\n" + "\n".join(lineas) + "\n\n¿Cuál te apetece?"
 
     @staticmethod
     def _extract_size(lowered: str) -> Size | None:
@@ -218,13 +289,14 @@ class Conversation:
         return None
 
     @staticmethod
-    def _extract_quantity(lowered: str) -> int | None:
-        words_to_numbers = {"una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4}
-        if lowered in words_to_numbers:
-            return words_to_numbers[lowered]
-        if lowered.isdigit():
-            qty = int(lowered)
+    def _find_quantity(lowered: str) -> int | None:
+        match = re.search(r"\d+", lowered)
+        if match:
+            qty = int(match.group())
             return qty if 0 < qty <= 20 else None
+        for word, num in _WORD_NUMBERS.items():
+            if word in lowered.split():
+                return num
         return None
 
     @staticmethod
@@ -241,16 +313,10 @@ class Conversation:
 
     def _build_order(self) -> tuple[Order | None, str | None]:
         try:
-            item = OrderItem(
-                pizza=self._data["pizza"],
-                size=self._data["size"],
-                quantity=self._data["quantity"],
-                extras=self._data.get("extras", []),
-            )
             order = Order(
                 customer_name=self._data["customer_name"],
-                item=item,
-                drink=self._data.get("drink"),
+                items=self._items,
+                drinks=self._drinks,
                 address=self._data["address"],
                 notes=self._data.get("notes"),
             )

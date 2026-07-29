@@ -1,43 +1,34 @@
-"""
-Datos del negocio: precios e ingredientes.
+from app.models import Drink, Order, PizzaType, Size, Topping
 
-Si mañana cambia el menú o los precios, este es el único archivo a tocar;
-la lógica de conversación (app/conversation.py) no sabe nada de precios.
-"""
-
-from app.models import Drink, PizzaType, Size, Topping
-
-PIZZA_INGREDIENTS: dict[PizzaType, str] = {
+PIZZA_INGREDIENTS = {
     PizzaType.MARGARITA: "tomate, mozzarella y albahaca",
     PizzaType.HAWAIANA: "jamón y piña",
     PizzaType.PEPPERONI: "tomate, mozzarella y pepperoni",
     PizzaType.VEGETARIANA: "tomate, mozzarella, champiñones, pimiento y aceitunas",
     PizzaType.CUATRO_QUESOS: "mozzarella, gorgonzola, parmesano y emmental",
     PizzaType.BARBACOA: "salsa barbacoa, pollo, cebolla y mozzarella",
-    PizzaType.CARBONARA: "guanciale, huevo, pimienta y parmesano",
+    PizzaType.CARBONARA: "nata, bacon, huevo y parmesano",
     PizzaType.DIAVOLA: "tomate, mozzarella, salami picante y guindilla",
 }
 
-# Precio base de la pizza en tamaño "individual" (EUR).
-PIZZA_BASE_PRICE: dict[PizzaType, float] = {
-    PizzaType.MARGARITA: 9.50,
-    PizzaType.HAWAIANA: 10.50,
-    PizzaType.PEPPERONI: 10.50,
-    PizzaType.VEGETARIANA: 10.90,
-    PizzaType.CUATRO_QUESOS: 11.50,
-    PizzaType.BARBACOA: 12.90,
-    PizzaType.CARBONARA: 12.90,
-    PizzaType.DIAVOLA: 11.50,
+PIZZA_BASE_PRICE = {
+    PizzaType.MARGARITA: 6.50,
+    PizzaType.HAWAIANA: 7.50,
+    PizzaType.PEPPERONI: 7.50,
+    PizzaType.VEGETARIANA: 7.90,
+    PizzaType.CUATRO_QUESOS: 8.50,
+    PizzaType.BARBACOA: 8.90,
+    PizzaType.CARBONARA: 8.90,
+    PizzaType.DIAVOLA: 8.50,
 }
 
-# El tamaño multiplica el precio base.
-SIZE_MULTIPLIER: dict[Size, float] = {
+SIZE_MULTIPLIER = {
     Size.INDIVIDUAL: 1.0,
     Size.MEDIANA: 1.4,
-    Size.FAMILIAR: 2.0,
+    Size.FAMILIAR: 2.3,
 }
 
-TOPPING_PRICE: dict[Topping, float] = {
+TOPPING_PRICE = {
     Topping.QUESO_EXTRA: 1.20,
     Topping.BACON: 1.50,
     Topping.CHAMPINONES: 1.00,
@@ -47,25 +38,26 @@ TOPPING_PRICE: dict[Topping, float] = {
     Topping.PICANTE: 0.50,
 }
 
-DRINK_PRICE: dict[Drink, float] = {
+DRINK_PRICE = {
     Drink.AGUA: 1.50,
     Drink.COLA: 2.00,
     Drink.NARANJA: 2.00,
-    Drink.LIMON: 2.00,
     Drink.CERVEZA: 2.50,
     Drink.ZUMO: 2.20,
 }
 
 
-def pizza_unit_price(pizza: PizzaType, size: Size, extras: list[Topping]) -> float:
-    """Precio de UNA pizza (con extras), sin multiplicar por cantidad."""
+def pizza_unit_price(pizza, size, extras):
     base = PIZZA_BASE_PRICE[pizza] * SIZE_MULTIPLIER[size]
     extras_cost = sum(TOPPING_PRICE[t] for t in extras)
     return round(base + extras_cost, 2)
 
 
-def order_total(pizza: PizzaType, size: Size, quantity: int, extras: list[Topping], drink: Drink | None) -> float:
-    total = pizza_unit_price(pizza, size, extras) * quantity
-    if drink:
-        total += DRINK_PRICE[drink]
+def order_total(order: Order) -> float:
+    """Suma el carrito completo: todas las pizzas + todas las bebidas."""
+    total = 0.0
+    for item in order.items:
+        total += pizza_unit_price(item.pizza, item.size, item.extras) * item.quantity
+    for selection in order.drinks:
+        total += DRINK_PRICE[selection.drink] * selection.quantity
     return round(total, 2)

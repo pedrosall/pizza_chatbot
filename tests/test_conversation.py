@@ -1,20 +1,4 @@
-"""
-Tests de la máquina de estados.
-
-Nota didáctica: como Conversation no depende de Telegram ni de ningún
-servicio externo, estos tests son rápidos, deterministas y no requieren
-red. Por eso mockeamos `extract_order_info`: sin el mock, cada test que
-pasa por ASK_PIZZA haría una llamada real a la API de Gemini (lento,
-frágil ante cortes de red o cuota, y no determinista). Con
-`return_value=None` simulamos "la IA no aportó nada", forzando el mismo
-camino por reglas de keywords que estos tests ya validaban en la Fase 0.
-
-Importante: mockeamos "app.conversation.extract_order_info" (donde se
-usa), no "app.ai_extractor.extract_order_info" (donde se define). Al
-hacer `from app.ai_extractor import extract_order_info` dentro de
-conversation.py, ese nombre queda enganchado también al módulo
-`app.conversation`, así que hay que interceptarlo ahí.
-"""
+"""Tests de la máquina de estados (flujo estilo pizzería real, Fase 3.6)."""
 
 from unittest.mock import patch
 
@@ -22,137 +6,176 @@ from app.conversation import Conversation, ConversationState
 
 
 @patch("app.conversation.extract_order_info", return_value=None)
-def test_happy_path_completes_order(mock_extract):
+def test_single_pizza_full_flow(mock_extract):
     convo = Conversation()
+    convo.greeting()
+    assert convo.state == ConversationState.ASK_ORDER
 
-    reply = convo.handle_message("Pedro")
-    assert "Pedro" in reply
-    assert convo.state == ConversationState.ASK_PIZZA
+    convo.handle_message("carbonara")
+    assert convo.state == ConversationState.ASK_ITEM_QUANTITY
 
-    reply = convo.handle_message("quiero una carbonara")
-    assert "carbonara" in reply.lower()
-    assert convo.state == ConversationState.ASK_SIZE
+    convo.handle_message("2")
+    assert convo.state == ConversationState.ASK_ITEM_SIZE
 
-    reply = convo.handle_message("familiar")
-    assert convo.state == ConversationState.ASK_QUANTITY
+    convo.handle_message("familiar")
+    assert convo.state == ConversationState.ASK_ITEM_EXTRAS
 
-    reply = convo.handle_message("2")
-    assert convo.state == ConversationState.ASK_EXTRAS
+    convo.handle_message("bacon")
+    assert convo.state == ConversationState.ASK_MORE_PIZZA
 
-    reply = convo.handle_message("bacon y queso extra")
-    assert convo.state == ConversationState.ASK_DRINK
+    convo.handle_message("no")
+    assert convo.state == ConversationState.ASK_DRINKS
 
-    reply = convo.handle_message("cerveza")
+    convo.handle_message("no")
     assert convo.state == ConversationState.ASK_NOTES
 
-    reply = convo.handle_message("sin cebolla por favor")
+    convo.handle_message("no")
+    assert convo.state == ConversationState.ASK_NAME
+
+    convo.handle_message("Pedro")
     assert convo.state == ConversationState.ASK_ADDRESS
 
-    reply = convo.handle_message("Calle Falsa 123, Madrid")
-    assert "Total" in reply
+    reply = convo.handle_message("Calle Falsa 123")
+    assert "Repito tu pedido" in reply
     assert convo.state == ConversationState.CONFIRM
 
-    reply = convo.handle_message("sí")
-    assert convo.is_finished
+    convo.handle_message("sí")
     assert convo.state == ConversationState.DONE
+    assert convo.order.customer_name == "Pedro"
+
+
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_two_pizzas_mentioned_in_one_message_both_captured(mock_extract):
+    convo = Conversation()
+    convo.handle_message("quiero una pepperoni y una vegetariana")
+
+    assert len(convo._pending) == 2
+    assert convo._pending[0]["pizza"].value == "pepperoni"
+    assert convo._pending[1]["pizza"].value == "vegetariana"
+
+    convo.handle_message("1")
+    convo.handle_message("mediana")
+    convo.handle_message("no")
+    assert len(convo._items) == 1
+    assert len(convo._pending) == 1
+
+    convo.handle_message("2")
+    convo.handle_message("familiar")
+    convo.handle_message("no")
+    assert len(convo._items) == 2
+    assert convo.state == ConversationState.ASK_MORE_PIZZA
+
+
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_multiple_drinks_with_quantities(mock_extract):
+    convo = Conversation()
+    convo.handle_message("hawaiana")
+    convo.handle_message("1")
+    convo.handle_message("individual")
+    convo.handle_message("no")
+    convo.handle_message("no")
+
+    convo.handle_message("3 cervezas")
+    convo.handle_message("1 agua")
+    convo.handle_message("no")
+
+    assert len(convo._drinks) == 2
+    assert convo._drinks[0].quantity == 3
+    assert convo._drinks[1].quantity == 1
+
+
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_back_command_returns_to_previous_prompt(mock_extract):
+    convo = Conversation()
+    convo.handle_message("margarita")
+    prompt_before = convo._last_prompt
+
+    convo.handle_message("2")
+    assert convo.state == ConversationState.ASK_ITEM_SIZE
+
+    reply = convo.handle_message("atrás")
+    assert convo.state == ConversationState.ASK_ITEM_QUANTITY
+    assert reply == prompt_before
+
+
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_back_command_with_no_history_is_safe(mock_extract):
+    convo = Conversation()
+    reply = convo.handle_message("atrás")
+    assert "no hay ningún paso anterior" in reply.lower()
 
 
 @patch("app.conversation.extract_order_info", return_value=None)
 def test_cancel_at_confirmation(mock_extract):
     convo = Conversation()
-    convo.handle_message("Ana")
     convo.handle_message("pepperoni")
-    convo.handle_message("familiar")
     convo.handle_message("1")
-    convo.handle_message("no")   # sin extras
-    convo.handle_message("no")   # sin bebida
-    convo.handle_message("no")   # sin notas
+    convo.handle_message("familiar")
+    convo.handle_message("no")
+    convo.handle_message("no")
+    convo.handle_message("no")
+    convo.handle_message("no")
+    convo.handle_message("Ana")
     convo.handle_message("Calle Real 5")
 
     reply = convo.handle_message("no")
-    assert convo.is_finished
     assert convo.state == ConversationState.CANCELLED
     assert "cancelado" in reply.lower()
 
 
+@patch("app.conversation.answer_off_topic", return_value=None)
 @patch("app.conversation.extract_order_info", return_value=None)
-def test_invalid_pizza_does_not_advance_state(mock_extract):
+def test_invalid_pizza_does_not_advance(mock_extract, mock_faq):
     convo = Conversation()
-    convo.handle_message("Luis")
     reply = convo.handle_message("quiero una pizza de piña con nata")
-    assert convo.state == ConversationState.ASK_PIZZA
-    assert "no tenemos" in reply.lower()
+    assert convo.state == ConversationState.ASK_ORDER
+    assert "no te he entendido bien" in reply.lower()
 
 
 @patch("app.conversation.extract_order_info", return_value=None)
-def test_ingredient_question_does_not_consume_pizza_slot(mock_extract):
+def test_ingredient_question_does_not_start_an_order(mock_extract):
     convo = Conversation()
-    convo.handle_message("Marta")
     reply = convo.handle_message("¿qué lleva la vegetariana?")
     assert "champiñones" in reply.lower()
-    assert convo.state == ConversationState.ASK_PIZZA
-
-
-@patch("app.conversation.extract_order_info", return_value=None)
-def test_invalid_quantity_reprompts(mock_extract):
-    convo = Conversation()
-    convo.handle_message("Iker")
-    convo.handle_message("hawaiana")
-    convo.handle_message("individual")
-    reply = convo.handle_message("muchas")
-    assert convo.state == ConversationState.ASK_QUANTITY
-    assert "número" in reply.lower()
-
-
-@patch("app.conversation.extract_order_info", return_value=None)
-def test_word_number_for_quantity(mock_extract):
-    convo = Conversation()
-    convo.handle_message("Iker")
-    convo.handle_message("hawaiana")
-    convo.handle_message("individual")
-    convo.handle_message("una")
-    assert convo.state == ConversationState.ASK_EXTRAS
-
-
-@patch("app.conversation.extract_order_info", return_value=None)
-def test_extras_multiple_toppings_no_duplicates(mock_extract):
-    convo = Conversation()
-    convo.handle_message("Nora")
-    convo.handle_message("margarita")
-    convo.handle_message("mediana")
-    convo.handle_message("1")
-    convo.handle_message("bacon, bacon y aceitunas")
-    order_item_extras = convo._data["extras"]
-    assert len(order_item_extras) == 2  # bacon no se duplica
+    assert convo.state == ConversationState.ASK_ORDER
+    assert not convo._pending
 
 
 @patch("app.conversation.extract_order_info", return_value=None)
 def test_unrecognized_extra_reprompts(mock_extract):
     convo = Conversation()
-    convo.handle_message("Nora")
     convo.handle_message("margarita")
-    convo.handle_message("mediana")
     convo.handle_message("1")
-    reply = convo.handle_message("piña")  # no es un Topping válido
-    assert convo.state == ConversationState.ASK_EXTRAS
+    convo.handle_message("mediana")
+    reply = convo.handle_message("piña")
+    assert convo.state == ConversationState.ASK_ITEM_EXTRAS
     assert "no he reconocido" in reply.lower()
 
 
 @patch("app.conversation.extract_order_info", return_value=None)
-def test_order_property_only_available_when_done(mock_extract):
+def test_menu_question_shows_menu_not_error(mock_extract):
     convo = Conversation()
-    assert convo.order is None  # todavía no hay pedido
+    reply = convo.handle_message("¿qué pizzas tenéis?")
+    assert "nuestras pizzas" in reply.lower()
+    assert "carbonara" in reply.lower()
+    assert convo.state == ConversationState.ASK_ORDER
 
-    convo.handle_message("Leo")
-    convo.handle_message("hawaiana")
-    convo.handle_message("individual")
-    convo.handle_message("1")
-    convo.handle_message("no")
-    convo.handle_message("no")
-    convo.handle_message("no")
-    convo.handle_message("Calle Test 9")
-    assert convo.order is None  # en CONFIRM, todavía no confirmado
 
-    convo.handle_message("sí")
-    assert convo.order is not None
-    assert convo.order.customer_name == "Leo"
+@patch("app.conversation.extract_order_info", return_value=None)
+@patch(
+    "app.conversation.answer_off_topic",
+    return_value="¡Buena pregunta! Tardamos unos 30-40 min. ¿Empezamos tu pedido?",
+)
+def test_off_topic_question_gets_helpful_reply_not_error(mock_faq, mock_extract):
+    convo = Conversation()
+    reply = convo.handle_message("¿cuánto tardáis en traer la pizza?")
+    assert "30-40" in reply
+    assert convo.state == ConversationState.ASK_ORDER
+
+
+@patch("app.conversation.extract_order_info", return_value=None)
+@patch("app.conversation.answer_off_topic", return_value=None)
+def test_off_topic_falls_back_when_ai_unavailable(mock_faq, mock_extract):
+    convo = Conversation()
+    reply = convo.handle_message("cuéntame un chiste")
+    assert "no te he entendido bien" in reply.lower()

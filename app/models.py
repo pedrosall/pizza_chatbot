@@ -1,13 +1,3 @@
-"""
-Modelos de dominio del pedido.
-
-Por qué Pydantic y no dicts sueltos:
-- Validación automática (si `size` no es válido, falla aquí, no 3 pasos después).
-- Autocompletado y tipado en el editor.
-- Estos mismos modelos se reutilizarán en la Fase 1 para forzar a Gemini
-  a devolver datos con una forma exacta (structured output).
-"""
-
 from __future__ import annotations
 
 from enum import Enum
@@ -37,14 +27,11 @@ class Drink(str, Enum):
     AGUA = "agua"
     COLA = "cola"
     NARANJA = "naranja"
-    LIMON = "limón"
     CERVEZA = "cerveza"
     ZUMO = "zumo"
 
 
 class Topping(str, Enum):
-    """Ingrediente extra que se puede añadir a una pizza, con coste aparte."""
-
     QUESO_EXTRA = "queso extra"
     BACON = "bacon"
     CHAMPINONES = "champiñones"
@@ -54,8 +41,8 @@ class Topping(str, Enum):
     PICANTE = "picante"
 
 
-class OrderItem(BaseModel):
-    """Una pizza dentro del pedido (más adelante permitiremos varias en un mismo pedido)."""
+class CartItem(BaseModel):
+    """Una pizza dentro del carrito. Un pedido puede tener varias."""
 
     pizza: PizzaType
     size: Size
@@ -65,16 +52,22 @@ class OrderItem(BaseModel):
     @field_validator("extras")
     @classmethod
     def _no_duplicate_extras(cls, v: list[Topping]) -> list[Topping]:
-        # Pedir "bacon" dos veces no debería duplicar el cargo.
         return list(dict.fromkeys(v))
 
 
+class DrinkSelection(BaseModel):
+    """Una bebida y cuántas unidades. Un pedido puede tener varias distintas."""
+
+    drink: Drink
+    quantity: int = Field(gt=0, le=20)
+
+
 class Order(BaseModel):
-    """El pedido completo de un cliente."""
+    """El pedido completo: un carrito de pizzas + una lista de bebidas."""
 
     customer_name: str = Field(min_length=1, max_length=80)
-    item: OrderItem
-    drink: Optional[Drink] = None
+    items: list[CartItem] = Field(min_length=1)
+    drinks: list[DrinkSelection] = Field(default_factory=list)
     address: str = Field(min_length=5, max_length=200)
     notes: Optional[str] = Field(default=None, max_length=200)
 
@@ -84,14 +77,20 @@ class Order(BaseModel):
         return v.strip().capitalize()
 
     def summary(self) -> str:
-        """Texto de confirmación legible para el cliente."""
-        drink_txt = self.drink.value if self.drink else "sin bebida"
-        extras_txt = f" + {', '.join(e.value for e in self.item.extras)}" if self.item.extras else ""
-        notes_txt = f"\n📝 {self.notes}" if self.notes else ""
-        return (
-            f"👤 {self.customer_name}\n"
-            f"🍕 {self.item.quantity}x {self.item.pizza.value} ({self.item.size.value}){extras_txt}\n"
-            f"🥤 {drink_txt}"
-            f"{notes_txt}\n"
-            f"📍 {self.address}"
-        )
+        lines = [f"👤 {self.customer_name}"]
+        for item in self.items:
+            extras_txt = (
+                f" + {', '.join(e.value for e in item.extras)}" if item.extras else ""
+            )
+            lines.append(f"🍕 {item.quantity}x {item.pizza.value} ({item.size.value}){extras_txt}")
+
+        if self.drinks:
+            drinks_txt = ", ".join(f"{d.quantity}x {d.drink.value}" for d in self.drinks)
+            lines.append(f"🥤 {drinks_txt}")
+        else:
+            lines.append("🥤 sin bebida")
+
+        if self.notes:
+            lines.append(f"📝 {self.notes}")
+        lines.append(f"📍 {self.address}")
+        return "\n".join(lines)
