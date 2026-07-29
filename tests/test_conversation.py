@@ -205,3 +205,32 @@ def test_size_synonym_pequena_maps_to_individual(mock_extract):
     reply = convo.handle_message("pequeña")
     assert convo.state == ConversationState.ASK_ITEM_EXTRAS
     assert "individual" in reply.lower()
+
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_multiple_drinks_in_one_message(mock_extract):
+    convo = Conversation()
+    convo.handle_message("margarita")
+    convo.handle_message("1")
+    convo.handle_message("mediana")
+    convo.handle_message("no")
+    convo.handle_message("no")  # sin más pizzas
+
+    reply = convo.handle_message("una cerveza y una cocacola")
+    assert len(convo._drinks) == 2
+    assert convo._drinks[0].drink.value == "cerveza"
+    assert convo._drinks[1].drink.value == "cola"
+    assert "cerveza" in reply.lower()
+    assert "cola" in reply.lower()
+
+
+@patch("app.conversation.extract_order_info", return_value=None)
+def test_limonada_synonym_recognized(mock_extract):
+    convo = Conversation()
+    convo.handle_message("margarita")
+    convo.handle_message("1")
+    convo.handle_message("mediana")
+    convo.handle_message("no")
+    convo.handle_message("no")
+
+    convo.handle_message("un limón")
+    assert convo._drinks[0].drink.value == "limonada"

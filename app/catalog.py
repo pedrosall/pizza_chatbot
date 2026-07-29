@@ -43,7 +43,8 @@ DRINK_PRICE = {
     Drink.COLA: 2.00,
     Drink.NARANJA: 2.00,
     Drink.CERVEZA: 2.50,
-    Drink.ZUMO: 2.20,
+    Drink.SPRITE: 2.00,
+    Drink.LIMONADA: 2.00,
 }
 
 

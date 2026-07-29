@@ -28,7 +28,18 @@ class Drink(str, Enum):
     COLA = "cola"
     NARANJA = "naranja"
     CERVEZA = "cerveza"
-    ZUMO = "zumo"
+    SPRITE = "sprite"
+    LIMONADA = "limonada"
+
+
+DRINK_DISPLAY_NAMES: dict[Drink, str] = {
+    Drink.AGUA: "agua",
+    Drink.COLA: "cola",
+    Drink.NARANJA: "refresco de naranja",
+    Drink.CERVEZA: "cerveza",
+    Drink.SPRITE: "sprite",
+    Drink.LIMONADA: "limonada",
+}
 
 
 class Topping(str, Enum):
@@ -85,7 +96,7 @@ class Order(BaseModel):
             lines.append(f"🍕 {item.quantity}x {item.pizza.value} ({item.size.value}){extras_txt}")
 
         if self.drinks:
-            drinks_txt = ", ".join(f"{d.quantity}x {d.drink.value}" for d in self.drinks)
+            drinks_txt = ", ".join(f"{d.quantity}x {DRINK_DISPLAY_NAMES[d.drink]}" for d in self.drinks)
             lines.append(f"🥤 {drinks_txt}")
         else:
             lines.append("🥤 sin bebida")

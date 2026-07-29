@@ -23,7 +23,7 @@ from pydantic import ValidationError
 
 from app.ai_extractor import answer_off_topic, extract_order_info
 from app.catalog import PIZZA_INGREDIENTS, order_total
-from app.models import CartItem, Drink, DrinkSelection, Order, PizzaType, Size, Topping
+from app.models import CartItem, Drink, DrinkSelection, DRINK_DISPLAY_NAMES, Order, PizzaType, Size, Topping
 
 _BACK_COMMANDS = ("atrás", "atras", "volver")
 _WORD_NUMBERS = {"un": 1, "una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5}
@@ -43,6 +43,21 @@ _SIZE_SYNONYMS = {
     "chica": "individual",
     "chicas": "individual",
 }
+
+_DRINK_SYNONYMS = {
+    "cocacola": "cola",
+    "coca-cola": "cola",
+    "coca cola": "cola",
+    "refresco de cola": "cola",
+    "limón": "limonada",
+    "fanta de limón" : "limonada",
+    "limon": "limonada",
+    "naranjada": "refresco de naranja",
+    "fanta de naranja": "refresco de naranja",
+    "sprite": "sprite",
+    "7up": "sprite"
+}
+_DRINK_SPLIT_RE = re.compile(r",| y | e ")
 
 
 class ConversationState(Enum):
@@ -206,7 +221,7 @@ class Conversation:
             return "Cuéntame qué otra pizza quieres."
 
         self.state = ConversationState.ASK_DRINKS
-        opciones = ", ".join(d.value for d in Drink)
+        opciones = ", ".join(DRINK_DISPLAY_NAMES[d] for d in Drink)
         return (
             "¿Quieres alguna bebida? Dime cuál y cuántas (ej: '2 cervezas'), "
             f"o escribe 'no' para seguir.\nBebidas: {opciones}"
@@ -218,14 +233,14 @@ class Conversation:
             self.state = ConversationState.ASK_NOTES
             return "¿Alguna alergia o petición especial? (o escribe 'no')"
 
-        drink = self._extract_drink(lowered)
-        if drink is None:
-            opciones = ", ".join(d.value for d in Drink)
+        selections = self._extract_drinks(text)
+        if not selections:
+            opciones = ", ".join(DRINK_DISPLAY_NAMES[d] for d in Drink)
             return f"No he reconocido esa bebida. Opciones: {opciones} (o escribe 'no' para seguir)"
 
-        qty = self._find_quantity(lowered) or 1
-        self._drinks.append(DrinkSelection(drink=drink, quantity=qty))
-        return f"Apuntadas {qty}x {drink.value} 🥤 ¿Otra bebida? o escribe 'no' para seguir."
+        self._drinks.extend(selections)
+        resumen = ", ".join(f"{s.quantity}x {DRINK_DISPLAY_NAMES[s.drink]}" for s in selections)
+        return f"Apuntadas: {resumen} 🥤 ¿Otra bebida? o escribe 'no' para seguir."
 
     def _handle_ask_notes(self, text: str) -> str:
         lowered = text.lower()
@@ -307,6 +322,33 @@ class Conversation:
         for synonym, canonical in _SIZE_SYNONYMS.items():
             result = re.sub(rf"\b{synonym}\b", canonical, result, flags=re.IGNORECASE)
         return result
+
+    @staticmethod
+    def _normalize_drinks(text: str) -> str:
+        result = text
+        for synonym, canonical in _DRINK_SYNONYMS.items():
+            result = re.sub(rf"\b{re.escape(synonym)}\b", canonical, result, flags=re.IGNORECASE)
+        return result
+
+    def _extract_drinks(self, text: str) -> list[DrinkSelection]:
+        """Reconoce varias bebidas en un mismo mensaje ('una cerveza y una
+        cocacola'), separando por comas y conjunciones. No usa IA aquí a
+        propósito: el catálogo de bebidas es pequeño y cerrado, así que
+        reglas simples bastan y evitan una llamada de red innecesaria.
+        """
+        normalized = self._normalize_drinks(text.lower())
+        chunks = [c.strip() for c in _DRINK_SPLIT_RE.split(normalized) if c.strip()]
+        if not chunks:
+            chunks = [normalized]
+
+        selections: list[DrinkSelection] = []
+        for chunk in chunks:
+            drink = self._extract_drink(chunk)
+            if drink is None:
+                continue
+            qty = self._find_quantity(chunk) or 1
+            selections.append(DrinkSelection(drink=drink, quantity=qty))
+        return selections
 
     @staticmethod
     def _extract_size(lowered: str) -> Size | None:
