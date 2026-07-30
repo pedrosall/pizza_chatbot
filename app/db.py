@@ -11,13 +11,15 @@ from __future__ import annotations
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+import os
 
 
 class Base(DeclarativeBase):
     """Clase base de la que heredan todos los modelos de tabla (ORM)."""
 
 
-DATABASE_URL = "sqlite:///pizzabot.db"
+DATABASE_PATH = os.getenv("DATABASE_PATH", "pizzabot.db")
+DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
 
 engine = create_engine(DATABASE_URL, echo=False)
 

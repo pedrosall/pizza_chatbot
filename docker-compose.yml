@@ -1,0 +1,25 @@
+services:
+  bot:
+    build: .
+    command: python -m bot.telegram_bot
+    env_file: .env
+    volumes:
+      - pizzabot_data:/app/data
+    environment:
+      - DATABASE_PATH=/app/data/pizzabot.db
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    command: streamlit run dashboard/dashboard_app.py --server.address=0.0.0.0
+    env_file: .env
+    volumes:
+      - pizzabot_data:/app/data
+    environment:
+      - DATABASE_PATH=/app/data/pizzabot.db
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+
+volumes:
+  pizzabot_data:
