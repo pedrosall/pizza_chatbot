@@ -58,7 +58,7 @@ async def handle_text(message: Message) -> None:
     if convo.state == ConversationState.DONE and convo.order is not None:
         record = save_order(convo.order)
         logger.info("Pedido #%s guardado para %s", record.id, record.customer_name)
-        del conversations[chat_id]  # listo para un pedido nuevo si escribe otra vez
+        convo.reset_for_new_order()  # sigue en el dict, lista para otro pedido o preguntas
     elif convo.state == ConversationState.CANCELLED:
         del conversations[chat_id]
 

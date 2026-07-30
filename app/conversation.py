@@ -87,6 +87,7 @@ class Conversation:
         self._drinks: list[DrinkSelection] = []
         self._history: list[tuple[ConversationState, str]] = []
         self._last_prompt = ""
+        self._just_completed_order = False
 
     # ---- API pública ---------------------------------------------------
 
@@ -98,6 +99,20 @@ class Conversation:
             "'dos pepperoni familiares y una margarita mediana'."
         )
         return self._last_prompt
+    
+    def reset_for_new_order(self) -> None:
+        """Se llama tras confirmar un pedido: deja la conversación lista
+        para uno nuevo, pero recordando brevemente que se acaba de
+        completar uno, para que las respuestas a preguntas sueltas no
+        resulten incoherentes (ver _handle_ask_order)."""
+        self.state = ConversationState.ASK_ORDER
+        self._data = {}
+        self._pending = []
+        self._items = []
+        self._drinks = []
+        self._history = []
+        self._just_completed_order = True
+        self._last_prompt = ""
 
     def handle_message(self, text: str) -> str:
         text = text.strip()
@@ -144,13 +159,14 @@ class Conversation:
             if self._looks_like_menu_question(lowered):
                 return self._menu_text()
 
-            off_topic_reply = answer_off_topic(text)
+            off_topic_reply = answer_off_topic(text, just_completed_order=self._just_completed_order)
             if off_topic_reply:
                 return off_topic_reply
 
             opciones = ", ".join(p.value for p in PizzaType)
             return f"No te he entendido bien. Si quieres pedir, dime una pizza. Opciones: {opciones}"
 
+        self._just_completed_order = False
         self._pending.extend(items)
 
         if len(items) > 1:

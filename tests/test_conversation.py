@@ -275,3 +275,15 @@ def test_legitimate_allergy_note_accepted(mock_check):
     convo.state = ConversationState.ASK_NOTES
     reply = convo.handle_message("soy alérgico a los frutos secos")
     assert convo.state == ConversationState.ASK_NAME
+
+@patch("app.conversation.extract_order_info", return_value=None)
+@patch("app.conversation.answer_off_topic", return_value="Tu pedido va en camino 🍕 ¿algo más?")
+def test_off_topic_after_completed_order_gets_correct_context(mock_faq, mock_extract):
+    convo = Conversation()
+    convo._just_completed_order = True
+
+    convo.handle_message("¿cuánto tarda?")
+
+    mock_faq.assert_called_once()
+    _, kwargs = mock_faq.call_args
+    assert kwargs.get("just_completed_order") is True

@@ -92,6 +92,8 @@ Datos reales del negocio (SOLO puedes usar esta información, nunca te
 inventes horarios, precios o datos que no estén aquí):
 {facts}
 
+Contexto: {context}
+
 El cliente ha escrito esto, que NO es directamente un pedido de pizza:
 "{text}"
 
@@ -101,18 +103,29 @@ Instrucciones:
 - Si preguntan algo ajeno a la pizzería, contesta brevemente con naturalidad.
 - Si preguntan algo específico del negocio que no está en los datos de
   arriba, dilo con honestidad en vez de inventarlo.
-- Termina SIEMPRE invitando a pedir, con frases variadas.
+- Ajusta la frase final al contexto de arriba: si el cliente YA tiene un
+  pedido en camino, no le invites a pedir de nuevo como si no hubiera
+  pedido nada -- en su lugar, tranquilízale sobre su pedido actual o
+  pregúntale si necesita algo más. Si NO tiene ningún pedido en curso,
+  sí puedes invitarle a pedir.
 """
 
 
-def answer_off_topic(text: str) -> str | None:
+def answer_off_topic(text: str, just_completed_order: bool = False) -> str | None:
     client = _get_client()
     if client is None:
         return None
+
+    context = (
+        "El cliente acaba de confirmar un pedido, que ya está en camino."
+        if just_completed_order
+        else "El cliente todavía no ha hecho ningún pedido en esta conversación."
+    )
+
     try:
         response = client.models.generate_content(
             model="gemini-flash-latest",
-            contents=_FAQ_PROMPT.format(facts=BUSINESS_FACTS, text=text),
+            contents=_FAQ_PROMPT.format(facts=BUSINESS_FACTS, context=context, text=text),
         )
         return response.text.strip() if response.text else None
     except Exception as exc:  # noqa: BLE001
